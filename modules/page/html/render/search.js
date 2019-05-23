@@ -6,12 +6,15 @@ var pullAbortable = require('pull-abortable')
 var Scroller = require('../../../../lib/scroller')
 var nest = require('depnest')
 var Proxy = require('mutant/proxy')
+var ref = require('ssb-ref')
+var escapeStringRegexp = require('escape-string-regexp')
 
 exports.needs = nest({
   'sbot.pull.stream': 'first',
   'keys.sync.id': 'first',
   'message.html.render': 'first',
-  'intl.sync.i18n': 'first'
+  'intl.sync.i18n': 'first',
+  'sbot.pull.backlinks': 'first'
 })
 
 exports.gives = nest('page.html.render')
@@ -28,7 +31,7 @@ exports.create = function (api) {
     var updates = Value(0)
     var aborter = null
 
-    const searchHeader = h('div', {className: 'PageHeading'}, [
+    const searchHeader = h('div', { className: 'PageHeading' }, [
       h('h1', [h('strong', i18n('Search Results:')), ' ', query])
     ])
 
@@ -57,7 +60,7 @@ exports.create = function (api) {
     var realtimeAborter = pullAbortable()
 
     pull(
-      api.sbot.pull.stream(sbot => sbot.patchwork.linearSearch({old: false, query: query.split(whitespace)})),
+      getStream(query, true),
       realtimeAborter,
       pull.drain(msg => {
         updates.set(updates() + 1)
@@ -101,7 +104,7 @@ exports.create = function (api) {
       })
 
       pull(
-        api.sbot.pull.stream(sbot => sbot.search.query({query})),
+        getStream(query, false),
         pull.through(() => count.set(count() + 1)),
         aborter,
         pull.filter(msg => msg.value),
@@ -109,27 +112,79 @@ exports.create = function (api) {
       )
 
       loading.set(computed([done, scroller.queue], (done, queue) => {
-        return !done && queue < 5
+        return !done
       }))
     }
 
     function renderMsg (msg) {
-      var el = h('FeedEvent', api.message.html.render(msg))
+      var el = h('FeedEvent', api.message.html.render(msg, {
+        renderUnknown: true,
+        outOfContext: true
+      }))
       highlight(el, createOrRegExp(query.split(whitespace)))
       return el
     }
   })
+
+  function getStream (queryText, realtime = false) {
+    if (ref.isLink(queryText) || queryText.startsWith('#')) {
+      return api.sbot.pull.backlinks({
+        query: [ { $filter: { dest: queryText } } ],
+        reverse: true,
+        old: !realtime,
+        index: 'DTA' // use asserted timestamps
+      })
+    } else {
+      var { author, query, onlyPrivate } = parseSearch(queryText)
+      return pull(
+        onlyPrivate
+          ? api.sbot.pull.stream(sbot => sbot.patchwork.privateSearch({ old: !realtime, reverse: true, query: query.split(whitespace), author }))
+          : realtime
+            ? api.sbot.pull.stream(sbot => sbot.patchwork.linearSearch({ old: false, query: query.split(whitespace) }))
+            : api.sbot.pull.stream(sbot => sbot.search.query({ query })),
+        pull.filter(msg => {
+          if (author && msg.value.author !== author) return false
+          return true
+        })
+      )
+    }
+  }
+}
+
+function parseSearch (query) {
+  var parts = query.split(/\s/)
+  var result = []
+  var author = null
+  var onlyPrivate = false
+  parts.forEach(part => {
+    if (part.startsWith('author:')) {
+      part = part.slice(('author:').length)
+      if (ref.isFeedId(part)) {
+        author = part
+      }
+    } else if (part === 'is:private') {
+      onlyPrivate = true
+    } else {
+      result.push(part)
+    }
+  })
+
+  return {
+    query: result.join(' '),
+    onlyPrivate,
+    author
+  }
 }
 
 function createOrRegExp (ary) {
   return new RegExp(ary.map(function (e) {
-    return '\\b' + e + '\\b'
+    return '\\b' + escapeStringRegexp(e) + '\\b'
   }).join('|'), 'i')
 }
 
 function highlight (el, query) {
   if (el) {
-    var searcher = new TextNodeSearcher({container: el})
+    var searcher = new TextNodeSearcher({ container: el })
     searcher.query = query
     searcher.highlight()
     return el

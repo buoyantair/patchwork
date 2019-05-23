@@ -7,7 +7,7 @@ var nest = require('depnest')
 exports.needs = nest({
   'message.obs.get': 'first',
   'profile.html.person': 'first',
-  'message.html.meta': 'first',
+  'message.html.metas': 'first',
   'intl.sync.i18n': 'first'
 })
 
@@ -15,7 +15,7 @@ exports.gives = nest('message.html.missing')
 
 exports.create = function (api) {
   const i18n = api.intl.sync.i18n
-  return nest('message.html.missing', function (id, hintMessage) {
+  return nest('message.html.missing', function (id, hintMessage, rootMessage) {
     if (!ref.isMsg(id)) return
     var msg = api.message.obs.get(id, hintMessage)
     return computed(msg, msg => {
@@ -37,11 +37,11 @@ exports.create = function (api) {
                 ? [api.profile.html.person(msg.value.author), ' ', i18n('(missing message)')]
                 : h('strong', i18n('Missing message')),
               i18n(' via '), api.profile.html.person(hintMessage.value.author)]),
-            h('div.meta', [h('a', {href: msg.key}, msg.key)])
+            h('div.meta', [h('a', { href: msg.key }, msg.key)])
           ])
         ]),
         h('div.meta', [
-          api.message.html.meta(msg)
+          api.message.html.metas(msg)
         ])
       ]),
       h('section', [

@@ -1,6 +1,6 @@
 var nest = require('depnest')
 var extend = require('xtend')
-var {Value, h, computed, when} = require('mutant')
+var { Value, h, computed, when } = require('mutant')
 var fallbackImageUrl = 'data:image/gif;base64,R0lGODlhAQABAPAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw=='
 
 exports.gives = nest('profile.sheet.edit')
@@ -8,6 +8,7 @@ exports.gives = nest('profile.sheet.edit')
 exports.needs = nest({
   'sheet.display': 'first',
   'keys.sync.id': 'first',
+  'message.async.publish': 'first',
   'sbot.async.publish': 'first',
   'about.obs': {
     name: 'first',
@@ -18,12 +19,13 @@ exports.needs = nest({
   'blob.html.input': 'first',
   'blob.sync.url': 'first',
   'intl.sync.i18n': 'first',
+  'suggest.hook': 'first',
   'about.sync.shortFeedId': 'first'
 })
 
 exports.create = function (api) {
   const i18n = api.intl.sync.i18n
-  return nest('profile.sheet.edit', function () {
+  return nest('profile.sheet.edit', function ({ usePreview = true } = {}) {
     var id = api.keys.sync.id()
     api.sheet.display(close => {
       var currentName = api.about.obs.name(id)
@@ -57,7 +59,8 @@ exports.create = function (api) {
                   src: computed(chosenImage, (id) => id ? api.blob.sync.url(id) : fallbackImageUrl)
                 }),
                 h('span', ['🖼 ', i18n('Choose Profile Image...')]),
-                api.blob.html.input(file => {
+                api.blob.html.input((err, file) => {
+                  if (err) return
                   chosenImage.set(file.link)
                 }, {
                   accept: 'image/*',
@@ -67,12 +70,14 @@ exports.create = function (api) {
             ]),
             h('div.main', [
               h('input.name', {
+                'disabled': publishing,
                 placeholder: i18n('Choose a name'),
                 hooks: [ValueHook(chosenName), FocusHook()]
               }),
               h('textarea.description', {
+                'disabled': publishing,
                 placeholder: i18n('Describe yourself (if you want)'),
-                hooks: [ValueHook(chosenDescription)]
+                hooks: [ValueHook(chosenDescription), api.suggest.hook()]
               })
             ])
           ])
@@ -81,8 +86,12 @@ exports.create = function (api) {
           h('button -save', {
             'ev-click': save,
             'disabled': publishing
-          }, when(publishing, i18n('Publishing...'), i18n('Publish'))),
+          }, when(publishing,
+            i18n('Publishing...'),
+            usePreview ? i18n('Preview & Publish') : i18n('Publish')
+          )),
           h('button -cancel', {
+            'disabled': publishing,
             'ev-click': close
           }, i18n('Cancel'))
         ]
@@ -99,12 +108,16 @@ exports.create = function (api) {
 
         if (Object.keys(update).length) {
           publishing.set(true)
-          api.sbot.async.publish(extend({
+
+          var publish = usePreview
+            ? api.message.async.publish
+            : api.sbot.async.publish
+          publish(extend({
             type: 'about',
             about: id
-          }, update), (err) => {
+          }, update), (err, msg) => {
+            publishing.set(false)
             if (err) {
-              publishing.set(false)
               showDialog({
                 type: 'error',
                 title: i18n('Error'),
@@ -112,11 +125,19 @@ exports.create = function (api) {
                 message: i18n('An error occurred while attempting to publish about message.'),
                 detail: err.message
               })
-            } else {
+            } else if (msg) {
+              // user confirmed publish, so close the dialog
               close()
             }
           })
         } else {
+          showDialog({
+            type: 'info',
+            title: i18n('Update Profile'),
+            buttons: [i18n('OK')],
+            message: i18n('Nothing to publish'),
+            detail: i18n('You have not made any changes.')
+          })
           close()
         }
       }

@@ -26,10 +26,12 @@ exports.create = function (api) {
     const theme = api.settings.obs.get('patchwork.theme', 'light')
     const lang = api.settings.obs.get('patchwork.lang', '')
     const fontSize = api.settings.obs.get('patchwork.fontSize', '')
-    const filterFollowing = api.settings.obs.get('filters.following')
-    const filterSubscriptions = api.settings.obs.get('filters.subscriptions')
-    const onlySubscribed = api.settings.obs.get('filters.onlySubscribed')
-    const filterChannelViewSubscriptions = api.settings.obs.get('filters.channelView.subscriptions')
+    const includeParticipating = api.settings.obs.get('patchwork.includeParticipating', false)
+
+    // const filterFollowing = api.settings.obs.get('filters.following')
+    // const filterSubscriptions = api.settings.obs.get('filters.subscriptions')
+    // const onlySubscribed = api.settings.obs.get('filters.onlySubscribed')
+    // const filterChannelViewSubscriptions = api.settings.obs.get('filters.channelView.subscriptions')
 
     var prepend = [
       h('PageHeading', [
@@ -51,7 +53,7 @@ exports.create = function (api) {
               value: theme,
               'ev-change': (ev) => theme.set(ev.target.value)
             }, [
-              themeNames.map(name => h('option', {value: name}, [name]))
+              themeNames.map(name => h('option', { value: name }, [name]))
             ])
           ]),
 
@@ -62,8 +64,8 @@ exports.create = function (api) {
               value: lang,
               'ev-change': (ev) => lang.set(ev.target.value)
             }, [
-              h('option', {value: ''}, i18n('Default')),
-              locales.map(code => h('option', {value: code}, [
+              h('option', { value: '' }, i18n('Default')),
+              locales.map(code => h('option', { value: code }, [
                 '[', code, '] ', getLocaleName(code)
               ]))
             ])
@@ -76,42 +78,30 @@ exports.create = function (api) {
               value: fontSize,
               'ev-change': (ev) => fontSize.set(ev.target.value)
             }, [
-              h('option', {value: ''}, i18n('Default')),
-              fontSizes.map(size => h('option', {value: size}, size))
+              h('option', { value: '' }, i18n('Default')),
+              fontSizes.map(size => h('option', { value: size }, size))
             ])
           ]),
 
           h('section', [
-            h('h2', i18n('Public Feed Options')),
+            h('h2', i18n('Notification Options')),
 
             h('div', [
-              checkbox(filterFollowing, {
-                label: i18n('Hide following messages')
-              })
-            ]),
-
-            h('div', [
-              checkbox(filterSubscriptions, {
-                label: i18n('Hide channel (un)subcribe messages')
-              })
-            ]),
-
-            h('div', [
-              checkbox(onlySubscribed, {
-                label: i18n(`Hide posts in channels that are not subscribed`)
+              checkbox(includeParticipating, {
+                label: i18n('Include "Participating" tab in navigation bar')
               })
             ])
           ]),
 
-          h('section', [
-            h('h2', i18n('Channel Feed Options')),
+          // h('section', [
+          //   h('h2', i18n('Channel Feed Options')),
 
-            h('div', [
-              checkbox(filterChannelViewSubscriptions, {
-                label: i18n('Hide channel (un)subcribe messages')
-              })
-            ])
-          ]),
+          //   h('div', [
+          //     checkbox(filterChannelViewSubscriptions, {
+          //       label: i18n('Hide channel subscription messages')
+          //     })
+          //   ])
+          // ]),
 
           h('section', [
             h('h2', i18n('Information')),
@@ -135,7 +125,7 @@ exports.create = function (api) {
   })
 }
 
-function checkbox (param, {label}) {
+function checkbox (param, { label }) {
   return h('label', [
     h('input', {
       type: 'checkbox',

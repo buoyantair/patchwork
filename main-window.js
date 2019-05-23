@@ -12,16 +12,21 @@ var LatestUpdate = require('./lib/latest-update')
 var ref = require('ssb-ref')
 var setupContextMenuAndSpellCheck = require('./lib/context-menu-and-spellcheck')
 var watch = require('mutant/watch')
+var requireStyle = require('require-style')
+var ssbUri = require('ssb-uri')
+
+try {
+  var mouseForwardBack = require('mouse-forward-back')
+} catch (err) {
+  mouseForwardBack = false
+}
 
 module.exports = function (config) {
   var sockets = combine(
     overrideConfig(config),
-    addCommand('app.navigate', setView),
+    addCommand('app.navigate', navigate),
     require('./modules'),
-    require('./plugs'),
-    require('patch-settings'),
-    require('patchcore'),
-    require('./overrides')
+    require('patch-settings')
   )
 
   var api = entry(sockets, nest({
@@ -46,26 +51,42 @@ module.exports = function (config) {
     'intl.sync.i18n': 'first'
   }))
 
-  setupContextMenuAndSpellCheck(api.config.sync.load())
-
   const i18n = api.intl.sync.i18n
+  setupContextMenuAndSpellCheck(api.config.sync.load(), { navigate, get: api.sbot.async.get })
 
   var id = api.keys.sync.id()
   var latestUpdate = LatestUpdate()
   var subscribedChannels = api.channel.obs.subscribed(id)
+  var includeParticipating = api.settings.obs.get('patchwork.includeParticipating', false)
 
   // prompt to setup profile on first use
   onceTrue(api.sbot.obs.connection, (sbot) => {
-    sbot.latestSequence(sbot.id, (_, key) => {
+    sbot.latestSequence(api.keys.sync.id(), (err, key) => {
+      if (err) {
+        // This may throw an error if the feed doesn't have any messages, but
+        // that shouldn't cause any problems so this error can be ignored.
+      }
+
       if (key == null) {
-        api.profile.sheet.edit()
+        api.profile.sheet.edit({ usePreview: false })
       }
     })
   })
 
-  var views = api.app.views(api.page.html.render, [
-    '/public', '/private', id, '/mentions'
-  ])
+  var defaultViews = computed(includeParticipating, (includeParticipating) => {
+    var result = [
+      '/public', '/private', '/mentions'
+    ]
+
+    // allow user to choose in settings whether to show participating tab
+    if (includeParticipating) {
+      result.push('/participating')
+    }
+
+    return result
+  })
+
+  var views = api.app.views(api.page.html.render, defaultViews)
 
   var pendingCount = views.get('/mentions').pendingUpdates
 
@@ -73,10 +94,38 @@ module.exports = function (config) {
     electron.remote.app.setBadgeCount(count)
   })
 
+  electron.ipcRenderer.on('goForward', views.goForward)
+  electron.ipcRenderer.on('goBack', views.goBack)
+
+  if (mouseForwardBack) {
+    mouseForwardBack.register((direction) => {
+      if (direction === 'back') {
+        views.goBack()
+      } else if (direction === 'forward') {
+        views.goForward()
+      }
+    },
+    electron.remote.getCurrentWindow().getNativeWindowHandle())
+  }
+
   document.head.appendChild(
     h('style', {
       innerHTML: computed(api.settings.obs.get('patchwork.theme', 'light'), themeName => {
         return themes[themeName] || themes['light']
+      })
+    })
+  )
+
+  document.head.appendChild(
+    h('style', {
+      innerHTML: computed(api.settings.obs.get('patchwork.theme', 'light'), themeName => {
+        const syntaxThemeOptions = {
+          light: 'github',
+          dark: 'monokai'
+        }
+
+        const syntaxTheme = syntaxThemeOptions[themeName] || syntaxThemeOptions['light']
+        return requireStyle(`highlight.js/styles/${syntaxTheme}.css`)
       })
     })
   )
@@ -92,7 +141,10 @@ module.exports = function (config) {
   )
 
   var container = h(`MainWindow -${process.platform}`, {
-    classList: [ when(api.app.fullscreen(), '-fullscreen') ]
+    classList: [ when(api.app.fullscreen(), '-fullscreen') ],
+    'ev-dragover': preventDefault,
+    'ev-drop': preventDefault,
+    'ev-dragstart': preventDefaultUnlessImage
   }, [
     h('div.top', [
       h('span.history', [
@@ -110,9 +162,14 @@ module.exports = function (config) {
         tab(i18n('Private'), '/private'),
         dropTab(i18n('More'), [
           getSubscribedChannelMenu,
+          subMenu(i18n('Participating'), [
+            [i18n('All Threads'), '/participating'],
+            [i18n('Threads Started By You'), '/your-posts']
+          ]),
           [i18n('Gatherings'), '/gatherings'],
+          [i18n('Tags'), `/tags/all/${encodeURIComponent(id)}`],
           [i18n('Extended Network'), '/all'],
-          {separator: true},
+          { separator: true },
           [i18n('Settings'), '/settings']
         ])
       ]),
@@ -123,6 +180,9 @@ module.exports = function (config) {
       h('span', [ api.app.html.search(api.app.navigate) ]),
       h('span.nav', [
         tab(i18n('Profile'), id),
+        computed(includeParticipating, (includeParticipating) => {
+          if (includeParticipating) return tab(i18n('Participating'), '/participating')
+        }),
         tab(i18n('Mentions'), '/mentions')
       ])
     ]),
@@ -130,7 +190,7 @@ module.exports = function (config) {
       h('div.info', [
         h('a.message -update', { href: 'https://github.com/ssbc/patchwork/releases' }, [
           h('strong', ['Patchwork ', latestUpdate, i18n(' has been released.')]), i18n(' Click here to download and view more info!'),
-          h('a.ignore', {'ev-click': latestUpdate.ignore}, 'X')
+          h('a.ignore', { 'ev-click': latestUpdate.ignore }, 'X')
         ])
       ])
     ),
@@ -140,26 +200,32 @@ module.exports = function (config) {
   var previewElement = api.app.linkPreview(container, 500)
 
   catchLinks(container, (href, external, anchor) => {
+    if (!href) return
     if (external) {
       electron.shell.openExternal(href)
-    } else if (href && href.startsWith('&')) { // (ref.isBlob(href)) {
-      electron.shell.openExternal(api.blob.sync.url(href))
-    } else if (ref.isMsg(href)) {
-      getExternalHandler(href, (err, handler) => {
-        if (!err && handler) {
-          handler(href)
-        } else {
-          api.app.navigate(href, anchor)
-        }
-      })
     } else {
       api.app.navigate(href, anchor)
     }
   })
-
   return [container, previewElement]
 
   // scoped
+
+  function subMenu (label, items) {
+    return function () {
+      return {
+        label,
+        submenu: items.map(item => {
+          return {
+            label: item[0],
+            click () {
+              navigate(item[1])
+            }
+          }
+        })
+      }
+    }
+  }
 
   function getSubscribedChannelMenu () {
     var channels = Array.from(subscribedChannels()).sort(localeCompare)
@@ -168,17 +234,17 @@ module.exports = function (config) {
       return {
         label: i18n('Channels'),
         submenu: [
-          { label: i18n('Browse All'),
+          { label: i18n('Browse Recently Active'),
             click () {
-              setView('/channels')
+              navigate('/channels')
             }
           },
-          {type: 'separator'}
+          { type: 'separator' }
         ].concat(channels.map(channel => {
           return {
             label: `#${channel}`,
             click () {
-              setView(`#${channel}`)
+              navigate(`#${channel}`)
             }
           }
         }))
@@ -187,7 +253,7 @@ module.exports = function (config) {
       return {
         label: i18n('Browse Channels'),
         click () {
-          setView('/channels')
+          navigate('/channels')
         }
       }
     }
@@ -207,15 +273,15 @@ module.exports = function (config) {
               return {
                 label: item[0],
                 click () {
-                  setView(item[1])
+                  navigate(item[1])
                 }
               }
             }
           }))
-          menu.popup(electron.remote.getCurrentWindow(), {
+          menu.popup({
+            window: electron.remote.getCurrentWindow(),
             x: Math.round(rects.left * factor),
-            y: Math.round(rects.bottom * factor) + 4,
-            async: true
+            y: Math.round(rects.bottom * factor) + 4
           })
         })
       }
@@ -223,24 +289,56 @@ module.exports = function (config) {
     return element
   }
 
-  function setView (href, anchor) {
-    previewElement.cancel()
-    views.setView(href, anchor)
+  function navigate (href, anchor) {
+    if (typeof href !== 'string') return false
+    getExternalHandler(href, (err, handler) => {
+      if (!err && handler) {
+        handler(href)
+      } else {
+        if (href.startsWith('ssb:')) {
+          try {
+            href = ssbUri.toSigilLink(href)
+          } catch (e) {
+            // error can be safely ignored
+            // it just means this isn't an SSB URI
+          }
+        }
+
+        // no external handler found, use page.html.render
+        previewElement.cancel()
+        views.setView(href, anchor)
+      }
+    })
   }
 
-  function getExternalHandler (key, cb) {
-    api.sbot.async.get(key, function (err, value) {
-      if (err) return cb(err)
-      cb(null, api.app.sync.externalHandler({key, value}))
-    })
+  function getExternalHandler (href, cb) {
+    var link = ref.parseLink(href)
+    if (link && ref.isMsg(link.link)) {
+      var params = { id: link.link }
+      if (link.query && link.query.unbox) {
+        params.private = true
+        params.unbox = link.query.unbox
+      }
+      api.sbot.async.get(params, function (err, value) {
+        if (err) return cb(err)
+        cb(null, api.app.sync.externalHandler({ key: link.link, value, query: link.query }))
+      })
+    } else if (link && ref.isBlob(link.link)) {
+      cb(null, function (href) {
+        electron.shell.openExternal(api.blob.sync.url(href))
+      })
+    } else {
+      cb()
+    }
   }
 
   function tab (name, view) {
     var instance = views.get(view)
     return h('a', {
       'ev-click': function (ev) {
+        var instance = views.get(view)
         var isSelected = views.currentView() === view
-        var needsRefresh = instance.pendingUpdates && instance.pendingUpdates()
+        var needsRefresh = instance && instance.pendingUpdates && instance.pendingUpdates()
 
         // refresh if tab is clicked when there are pending items or the page is already selected
         if ((needsRefresh || isSelected) && instance.reload) {
@@ -253,9 +351,9 @@ module.exports = function (config) {
       ]
     }, [
       name,
-      when(instance.pendingUpdates, [
+      instance ? when(instance.pendingUpdates, [
         ' (', instance.pendingUpdates, ')'
-      ])
+      ]) : null
     ])
   }
 
@@ -290,4 +388,14 @@ function addCommand (id, cb) {
 
 function localeCompare (a, b) {
   return a.localeCompare(b)
+}
+
+function preventDefault (ev) {
+  ev.preventDefault()
+}
+
+function preventDefaultUnlessImage (ev) {
+  if (ev.target.nodeName !== 'IMG') {
+    ev.preventDefault()
+  }
 }
